@@ -1,4 +1,5 @@
 import { ccc } from "@ckb-ccc/shell";
+import { currentLanguage, translate } from "./i18n";
 
 type Provider = {
   isCkbWallet: boolean;
@@ -13,7 +14,7 @@ declare global {
 
 export function walletProvider(): Provider {
   if (!window.ckb?.isCkbWallet) {
-    throw new Error("未检测到 ckb-tw 钱包，请安装并解锁扩展。 ");
+    throw new Error(translate(currentLanguage(), "walletMissing"));
   }
   return window.ckb;
 }
@@ -21,7 +22,7 @@ export function walletProvider(): Provider {
 export async function connectWallet(): Promise<string> {
   const accounts = await walletProvider().request({ method: "ckb_requestAccounts" });
   if (!Array.isArray(accounts) || typeof accounts[0] !== "string") {
-    throw new Error("钱包未返回 CKB 地址");
+    throw new Error(translate(currentLanguage(), "addressMissing"));
   }
   return accounts[0];
 }

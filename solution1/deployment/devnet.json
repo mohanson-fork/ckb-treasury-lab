@@ -3,41 +3,41 @@
   "feeRate": 1500,
   "scripts": {
     "config": {
-      "codeHash": "0xb062e35a92ccbfe61aca5530eb23a95791db2fcdf321760b9943410cf2bf71f0",
+      "codeHash": "0x6c972be4eff21c28a76d93161d46ba9e9f13347e8fbc024bc5f87a4ca089f8b1",
       "hashType": "data2",
-      "args": "0x28bfd383514c295a787da5ffc7f2cca27cd9ed29",
+      "args": "0x2cfa831668c0b9d6b05b5c71e4ee833f0da1a50a",
       "cellDep": {
-        "txHash": "0xe2be6d2c6db211621421c669739d194ef657000c9b6aeb50c30f66b95edcc173",
+        "txHash": "0x9093ae755e28e91428f4157098a47dcf6176c8771b0c199c40508d4b86c8d488",
         "index": 0,
         "depType": "code"
       }
     },
     "proposal": {
-      "codeHash": "0xd38da6685f8e729f40cb7035f1eafdae01295db3568af881146994bf0fbe8ffe",
+      "codeHash": "0xadbfdbbed8b5f81e8841ce18a3a812be27b2a3f7ed400583d3fed6e7b1713ce0",
       "hashType": "data2",
       "args": "0x",
       "cellDep": {
-        "txHash": "0xe2be6d2c6db211621421c669739d194ef657000c9b6aeb50c30f66b95edcc173",
+        "txHash": "0x9093ae755e28e91428f4157098a47dcf6176c8771b0c199c40508d4b86c8d488",
         "index": 1,
         "depType": "code"
       }
     },
     "vote": {
-      "codeHash": "0xd33e70a5460e2d5c8e37d3544c154562c65b7d57dc784c271600bf0371f12d1b",
+      "codeHash": "0x63c3ed56e8835622f2b3d768d4e66ca423a6a187ef93c2fed05bdad360164d9d",
       "hashType": "data2",
       "args": "0x",
       "cellDep": {
-        "txHash": "0xe2be6d2c6db211621421c669739d194ef657000c9b6aeb50c30f66b95edcc173",
+        "txHash": "0x9093ae755e28e91428f4157098a47dcf6176c8771b0c199c40508d4b86c8d488",
         "index": 2,
         "depType": "code"
       }
     },
     "counting": {
-      "codeHash": "0x99ac962b342038ef7c7e4c9c3778b04b3a03973785744a172c6977373ab1609c",
+      "codeHash": "0xe4766aac33ef204d842f0108f60df3c4bbfdcb99a301cc44fb62ab95087afc42",
       "hashType": "data2",
       "args": "0x",
       "cellDep": {
-        "txHash": "0xe2be6d2c6db211621421c669739d194ef657000c9b6aeb50c30f66b95edcc173",
+        "txHash": "0x9093ae755e28e91428f4157098a47dcf6176c8771b0c199c40508d4b86c8d488",
         "index": 3,
         "depType": "code"
       }
@@ -47,7 +47,7 @@
       "hashType": "data2",
       "args": "0x",
       "cellDep": {
-        "txHash": "0xe2be6d2c6db211621421c669739d194ef657000c9b6aeb50c30f66b95edcc173",
+        "txHash": "0x9093ae755e28e91428f4157098a47dcf6176c8771b0c199c40508d4b86c8d488",
         "index": 4,
         "depType": "code"
       }
@@ -101,7 +101,7 @@
     }
   },
   "configCell": {
-    "txHash": "0x7f7c958198b746c3500b0f996e3cd8f961d395426fbb86a77d5c85328a7861e2",
+    "txHash": "0x2b96debb50c7c82855e528493d12457fa63ac4eacbc8fb1b7df40654215bc140",
     "index": 0
   }
 }

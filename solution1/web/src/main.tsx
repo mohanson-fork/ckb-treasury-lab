@@ -3,11 +3,12 @@ import { createRoot } from "react-dom/client";
 import { ArrowRight, ArrowUpRight, Check, ChevronRight, CircleHelp, Clock3, ExternalLink, LayoutDashboard, LoaderCircle, Plus, RefreshCw, ShieldCheck, ThumbsDown, ThumbsUp, Vote, Wallet, X } from "lucide-react";
 import { ccc } from "@ckb-ccc/shell";
 import { castVote, withdrawVote } from "../../sdk/src/vote";
-import { createProposal, finalizeProposal, passProposal, challengeProposal } from "../../sdk/src/proposal";
+import { createProposal, finalizeProposal, passProposal, challengeProposal, recycleProposal } from "../../sdk/src/proposal";
 import { createCountingCell } from "../../sdk/src/counting";
-import { requireCellHeader, waitForTransaction } from "../../sdk/src/utils";
+import { blake160, requireCellHeader, waitForTransaction } from "../../sdk/src/utils";
 import { client, config, fetchSnapshot, type ProposalView } from "./chain";
 import { connectWallet, WalletSigner } from "./wallet";
+import { currentLanguage, translate, type Language, type TranslationKey } from "./i18n";
 import "./style.css";
 
 type Page = "overview" | "voter" | "initiator" | "challenger";
@@ -20,11 +21,11 @@ function ckb(amount: bigint): string {
   return `${whole.toLocaleString("en-US")}${decimals ? `.${decimals}` : ""}`;
 }
 
-function amountFromInput(value: string): bigint {
-  if (!/^\d+(\.\d{1,8})?$/.test(value)) throw new Error("请输入最多 8 位小数的有效 CKB 数量");
+function amountFromInput(value: string, language: Language): bigint {
+  if (!/^\d+(\.\d{1,8})?$/.test(value)) throw new Error(translate(language, "invalidAmount"));
   const [integer, fraction = ""] = value.split(".");
   const amount = BigInt(integer) * SHANNONS + BigInt(fraction.padEnd(8, "0"));
-  if (amount === 0n) throw new Error("金额必须大于 0");
+  if (amount === 0n) throw new Error(translate(language, "zeroAmount"));
   return amount;
 }
 
@@ -32,12 +33,27 @@ function short(value: string, start = 12, end = 8) {
   return `${value.slice(0, start)}…${value.slice(-end)}`;
 }
 
-function remaining(target: bigint, tip: bigint) {
+function remaining(target: bigint, tip: bigint, language: Language) {
   const blocks = target > tip ? target - tip : 0n;
-  return blocks ? `${blocks} 区块 · 约 ${Number(blocks) * 8} 秒` : "已到期";
+  return blocks ? translate(language, "blocksAndSeconds", { blocks: String(blocks), seconds: String(blocks * 8n) }) : translate(language, "expired");
+}
+
+function nonOverlappingCounting(entries: ProposalView["counting"]): ProposalView["counting"] {
+  const sorted = [...entries].sort((left, right) => left.data.endHash - right.data.endHash);
+  const plans: { amount: bigint; cells: ProposalView["counting"] }[] = [{ amount: 0n, cells: [] }];
+  for (const [index, entry] of sorted.entries()) {
+    let previous = index;
+    while (previous > 0 && sorted[previous - 1].data.endHash >= entry.data.startHash) previous--;
+    const candidate = plans[previous];
+    const amount = candidate.amount + entry.data.voteAmount;
+    plans.push(amount > plans[index].amount ? { amount, cells: [...candidate.cells, entry] } : plans[index]);
+  }
+  return plans[sorted.length].cells;
 }
 
 function App() {
+  const [language, setLanguage] = useState<Language>(currentLanguage);
+  const t = (key: Parameters<typeof translate>[1], variables?: Record<string, string | number>) => translate(language, key, variables);
   const [page, setPage] = useState<Page>("overview");
   const [address, setAddress] = useState("");
   const [signer, setSigner] = useState<WalletSigner | null>(null);
@@ -49,6 +65,13 @@ function App() {
   const [amount, setAmount] = useState("");
   const [recipient, setRecipient] = useState("");
   const [voteChoice, setVoteChoice] = useState<"yes" | "no">("yes");
+  const [checkedProposal, setCheckedProposal] = useState<string | null>(null);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+    document.title = t("appTitle");
+    localStorage.setItem("language", language);
+  }, [language]);
 
   async function refresh(showLoading = true) {
     if (showLoading) setLoading(true);
@@ -56,7 +79,7 @@ function App() {
       setSnapshot(await fetchSnapshot());
       setNotice((current) => current?.error ? null : current);
     } catch (error) {
-      setNotice({ text: `链上数据读取失败：${String(error)}`, error: true });
+      setNotice({ text: t("readFailed", { error: String(error) }), error: true });
     } finally {
       setLoading(false);
     }
@@ -71,10 +94,10 @@ function App() {
   async function connect(destination?: Page) {
     try {
       const account = await connectWallet();
-      if (!account.startsWith("ckt")) throw new Error("请将 ckb-tw 钱包切换到本地 develop 网络");
+      if (!account.startsWith("ckt")) throw new Error(t("wrongNetwork"));
       const { script } = await ccc.Address.fromString(account, client);
       const secp = await ccc.Script.fromKnownScript(client, ccc.KnownScript.Secp256k1Blake160, script.args);
-      if (!script.eq(secp)) throw new Error("目前只支持 ckb-tw 的 secp256k1 账户");
+      if (!script.eq(secp)) throw new Error(t("unsupportedAccount"));
       setAddress(account);
       setSigner(new WalletSigner(client, account, script));
       setNotice(null);
@@ -86,7 +109,7 @@ function App() {
 
   function navigate(destination: Page) {
     if (destination !== "overview" && destination !== "challenger" && !signer) {
-      setNotice({ text: "请先连接 ckb-tw 钱包", error: true });
+      setNotice({ text: t("walletRequired"), error: true });
       void connect(destination);
       return;
     }
@@ -94,17 +117,17 @@ function App() {
     setNotice(null);
   }
 
-  async function execute(key: string, label: string, action: (active: WalletSigner) => Promise<string>) {
+  async function execute(key: string, label: TranslationKey, action: (active: WalletSigner) => Promise<string>) {
     if (!signer) return void connect();
     setBusy(key);
-    setNotice({ text: `${label}：请在钱包中确认交易…`, error: false });
+    setNotice({ text: t("signing", { action: t(label) }), error: false });
     try {
       const result = await action(signer);
-      setNotice({ text: `${label}成功。交易 ${short(result, 16, 10)}`, error: false });
+      setNotice({ text: t("actionSuccess", { action: t(label), hash: short(result, 16, 10) }), error: false });
       await waitForTransaction(client, result);
       await refresh(false);
     } catch (error) {
-      setNotice({ text: `${label}失败：${String(error)}`, error: true });
+      setNotice({ text: t("actionFailed", { action: t(label), error: String(error) }), error: true });
     } finally {
       setBusy("");
     }
@@ -117,55 +140,68 @@ function App() {
   const settings = snapshot?.settings.data;
   const tip = snapshot?.tip ?? 0n;
   const proposals = snapshot?.proposals ?? [];
+  const recipientHash = signer ? blake160(signer.scripts[0].toBytes()) : null;
   const active = proposals.filter((p) => p.data.status === 0 && settings && tip < p.origin + settings.voteWindow);
-  const mine = proposals.filter(owned);
+  const mine = proposals.filter((p) => owned(p) || (p.data.status === 1 && p.data.recipientLockHash === recipientHash));
   const finalized = proposals.filter((p) => p.data.status === 1);
 
-  function actionButton(label: string, key: string, action: (active: WalletSigner) => Promise<string>, disabled = false, className = "button-secondary") {
-    return <button className={className} disabled={!!busy || disabled} onClick={() => void execute(key, label, action)}>{busy === key ? <LoaderCircle className="spin" size={16} /> : null}{label}</button>;
+  function actionButton(label: TranslationKey, key: string, action: (active: WalletSigner) => Promise<string>, disabled = false, className = "button-secondary") {
+    return <button className={className} disabled={!!busy || disabled} onClick={() => void execute(key, label, action)}>{busy === key ? <LoaderCircle className="spin" size={16} /> : null}{t(label)}</button>;
   }
 
   function proposalCard(proposal: ProposalView, mode: Page) {
     const { cell, data, origin, votes, counting } = proposal;
     const key = cell.outPoint.txHash;
     const myVote = votes.find((vote) => signer?.scripts[0].eq(vote.cell.cellOutput.lock));
-    const myCounting = counting.filter((entry) => signer?.scripts[0].eq(entry.cell.cellOutput.lock));
     const direction = mode === "challenger" ? 0 : 1;
-    const matching = myCounting.filter((entry) => entry.data.direction === direction);
+    const matching = nonOverlappingCounting(counting.filter((entry) => entry.data.direction === direction && signer?.scripts[0].eq(entry.cell.cellOutput.lock)));
     const counted = matching.reduce((sum, entry) => sum + entry.data.voteAmount, 0n);
     const end = origin + (settings?.voteDuration ?? 0n) + 1n;
     const windowEnd = origin + (settings?.voteWindow ?? 0n);
     const challengeEnd = challengeBlocks[key] === undefined ? null : challengeBlocks[key] + (settings?.challengeTime ?? 0n) + 1n;
     const canCount = mode === "challenger" ? tip > origin + (settings?.voteDuration ?? 0n) : tip >= end;
     const voteOpen = data.status === 0 && tip < windowEnd;
+    const hasYesVotes = votes.some((entry) => entry.data.direction === 1);
+    const hasYesCounting = counting.some((entry) => entry.data.direction === 1);
+    const hasFullRangeCounting = counting.some((entry) => entry.data.direction === direction && signer?.scripts[0].eq(entry.cell.cellOutput.lock) && entry.data.startHash === 0 && entry.data.endHash === 65535);
+    const noYesVotes = !hasYesVotes && !hasYesCounting;
+    const recycleAt = end + (settings?.challengeTime ?? 0n);
+    const threshold = settings?.yesThreshold ?? 0n;
+    const checkResult = counted >= threshold && matching.length > 0
+      ? t("countedPass", { amount: ckb(counted), next: t(canCount ? "readyToFinalize" : "waitToCount") })
+      : noYesVotes
+        ? t("noYesVotesMessage", { next: tip >= recycleAt ? t(voteOpen ? "recycleOrWait" : "recycleReady") : t("recycleLater", { time: remaining(recycleAt, tip, language) }) })
+        : t(proposal.yes >= threshold ? "votesMeetThreshold" : "votesBelowThreshold", { amount: ckb(proposal.yes), threshold: ckb(threshold) });
     return <article className="proposal" key={`${key}:${cell.outPoint.index}`}>
-      <div className="proposal-top"><span className={`tag tag-${data.status}`}>{["投票中", "挑战期", "已通过"][data.status] ?? "未知"}</span><span className="mono muted" title={proposal.id}>{short(proposal.id)}</span></div>
-      <h3>{data.description || "未命名提案"}</h3>
+      <div className="proposal-top"><span className={`tag tag-${data.status}`}>{t((["openStatus", "finalizedStatus", "passedStatus"] as const)[data.status] ?? "unknownStatus")}</span><span className="mono muted" title={proposal.id}>{short(proposal.id)}</span></div>
+      <h3>{data.description || t("unnamedProposal")}</h3>
       <div className="proposal-details">
-        <div><span>申请金额</span><strong>{ckb(data.requestedAmount)} <small>CKB</small></strong></div>
-        <div><span>接收方锁哈希</span><code title={data.recipientLockHash}>{short(data.recipientLockHash, 14, 8)}</code></div>
-        <div><span>赞成票</span><strong className="yes">{ckb(proposal.yes)} <small>CKB</small></strong></div>
-        <div><span>反对票</span><strong className="no">{ckb(proposal.no)} <small>CKB</small></strong></div>
+        <div><span>{t("requestedAmount")}</span><strong>{ckb(data.requestedAmount)} <small>CKB</small></strong></div>
+        <div><span>{t("recipientHash")}</span><code title={data.recipientLockHash}>{short(data.recipientLockHash, 14, 8)}</code></div>
+        <div><span>{t("yesVotes")}</span><strong className="yes">{ckb(proposal.yes)} <small>CKB</small></strong></div>
+        <div><span>{t("noVotes")}</span><strong className="no">{ckb(proposal.no)} <small>CKB</small></strong></div>
       </div>
-      {data.status !== 2 && <div className="countdown"><Clock3 size={16}/><span>{data.status === 0 ? mode === "voter" ? "投票窗口" : "可计票" : "挑战期限"}</span><strong>{data.status === 1 && challengeEnd === null ? "读取区块头…" : remaining(data.status === 0 ? mode === "voter" ? windowEnd : end : challengeEnd!, tip)}</strong></div>}
-      {mode === "voter" && myVote && <div className="vote-record"><Check size={16}/><span>已投 {myVote.data.direction === 1 ? "赞成" : "反对"} · {ckb(myVote.data.voteAmount)} CKB</span><span className="muted">区块 {voteBlocks[`${myVote.cell.outPoint.txHash}:${myVote.cell.outPoint.index}`] ?? "读取中"}</span></div>}
-      {(mode === "initiator" || mode === "challenger") && matching.length > 0 && <div className="vote-record"><Check size={16}/><span>{matching.length} 个计票单元 · {ckb(counted)} CKB</span></div>}
+      {data.status !== 2 && <div className="countdown"><Clock3 size={16}/><span>{t(data.status === 0 ? mode === "voter" ? "votingWindow" : "countingAvailable" : "challengeDeadline")}</span><strong>{data.status === 1 && challengeEnd === null ? t("loadingHeader") : remaining(data.status === 0 ? mode === "voter" ? windowEnd : end : challengeEnd!, tip, language)}</strong></div>}
+      {mode === "voter" && myVote && <div className="vote-record"><Check size={16}/><span>{t("voted", { direction: t(myVote.data.direction === 1 ? "yes" : "no"), amount: ckb(myVote.data.voteAmount) })}</span><span className="muted">{t("blockNumber", { number: voteBlocks[`${myVote.cell.outPoint.txHash}:${myVote.cell.outPoint.index}`] ?? t("loading") })}</span></div>}
+      {(mode === "initiator" || mode === "challenger") && matching.length > 0 && <div className="vote-record"><Check size={16}/><span>{t("countingSummary", { count: matching.length, amount: ckb(counted) })}</span></div>}
       <div className="proposal-actions">
         {mode === "voter" && voteOpen && (myVote
-          ? actionButton("撤回投票", `${key}-withdraw`, (s) => withdrawVote(s, config, { voteOutPoint: myVote.cell.outPoint }))
-          : <div className="vote-controls"><div className="segmented"><button className={voteChoice === "yes" ? "selected" : ""} onClick={() => setVoteChoice("yes")}><ThumbsUp size={15}/> 赞成</button><button className={voteChoice === "no" ? "selected" : ""} onClick={() => setVoteChoice("no")}><ThumbsDown size={15}/> 反对</button></div>{actionButton("投票", `${key}-vote`, async (s) => (await castVote(s, config, { proposalOutPoint: cell.outPoint, direction: voteChoice })).txHash, false, "button-primary")}</div>)}
+          ? actionButton("withdrawVote", `${key}-withdraw`, (s) => withdrawVote(s, config, { voteOutPoint: myVote.cell.outPoint }))
+          : <div className="vote-controls"><div className="segmented"><button className={voteChoice === "yes" ? "selected" : ""} onClick={() => setVoteChoice("yes")}><ThumbsUp size={15}/> {t("yes")}</button><button className={voteChoice === "no" ? "selected" : ""} onClick={() => setVoteChoice("no")}><ThumbsDown size={15}/> {t("no")}</button></div>{actionButton("castVote", `${key}-vote`, async (s) => (await castVote(s, config, { proposalOutPoint: cell.outPoint, direction: voteChoice })).txHash, false, "button-primary")}</div>)}
         {mode === "initiator" && data.status === 0 && <>
-          <button className="button-secondary" onClick={() => setNotice({ text: proposal.yes >= (settings?.yesThreshold ?? 0n) ? `当前赞成票 ${ckb(proposal.yes)} CKB 已达到门槛；最终仍须在计票后确认。` : `当前赞成票 ${ckb(proposal.yes)} CKB，尚未达到 ${ckb(settings?.yesThreshold ?? 0n)} CKB 门槛。`, error: false })}>检查能否通过</button>
-          {actionButton("统计赞成票（生成 1 个计票单元）", `${key}-count-yes`, async (s) => (await createCountingCell(s, config, { proposalOutPoint: cell.outPoint, direction: "yes", startHash: 0, endHash: 65535 })).txHash, !canCount || matching.length > 0)}
-          {actionButton("完成计票并最终确认", `${key}-finalize`, (s) => finalizeProposal(s, config, { proposalOutPoint: cell.outPoint, countingOutPoints: matching.map((entry) => entry.cell.outPoint) }), !canCount || counted < (settings?.yesThreshold ?? 0n))}
+          <button className="button-secondary" aria-expanded={checkedProposal === proposal.id} onClick={() => setCheckedProposal((current) => current === proposal.id ? null : proposal.id)}>{t("checkPass")}</button>
+          {actionButton("countYes", `${key}-count-yes`, async (s) => (await createCountingCell(s, config, { proposalOutPoint: cell.outPoint, direction: "yes", startHash: 0, endHash: 65535 })).txHash, !canCount || !hasYesVotes || counted >= threshold || hasFullRangeCounting)}
+          {actionButton("finalize", `${key}-finalize`, (s) => finalizeProposal(s, config, { proposalOutPoint: cell.outPoint, countingOutPoints: matching.map((entry) => entry.cell.outPoint) }), !canCount || counted < (settings?.yesThreshold ?? 0n))}
+          {tip >= recycleAt && actionButton("recycle", `${key}-recycle`, (s) => recycleProposal(s, config, { proposalOutPoint: cell.outPoint }))}
         </>}
-        {mode === "initiator" && data.status === 1 && actionButton("通过提案", `${key}-pass`, (s) => passProposal(s, config, { proposalOutPoint: cell.outPoint }), challengeEnd === null || tip < challengeEnd)}
+        {mode === "initiator" && data.status === 1 && data.recipientLockHash === recipientHash && actionButton("pass", `${key}-pass`, (s) => passProposal(s, config, { proposalOutPoint: cell.outPoint }), challengeEnd === null || tip < challengeEnd)}
         {mode === "challenger" && <>
-          <button className="button-secondary" onClick={() => setNotice({ text: proposal.no >= data.totalYes ? `反对票 ${ckb(proposal.no)} CKB 达到已确认的 ${ckb(data.totalYes)} CKB 赞成票；仍须生成计票单元。` : `反对票 ${ckb(proposal.no)} CKB，未达到 ${ckb(data.totalYes)} CKB。`, error: false })}>检查挑战条件</button>
-          {actionButton("统计反对票（生成 1 个计票单元）", `${key}-count-no`, async (s) => (await createCountingCell(s, config, { proposalOutPoint: cell.outPoint, direction: "no", startHash: 0, endHash: 65535 })).txHash, !canCount || matching.length > 0 || challengeEnd === null || tip >= challengeEnd)}
-          {actionButton("发起挑战", `${key}-challenge`, (s) => challengeProposal(s, config, { proposalOutPoint: cell.outPoint, countingOutPoints: matching.map((entry) => entry.cell.outPoint) }), !matching.length || counted < data.totalYes || challengeEnd === null || tip >= challengeEnd, "button-danger")}
+          <button className="button-secondary" onClick={() => setNotice({ text: t(proposal.no >= data.totalYes ? "challengeMet" : "challengeNotMet", { amount: ckb(proposal.no), threshold: ckb(data.totalYes) }), error: false })}>{t("checkChallenge")}</button>
+          {actionButton("countNo", `${key}-count-no`, async (s) => (await createCountingCell(s, config, { proposalOutPoint: cell.outPoint, direction: "no", startHash: 0, endHash: 65535 })).txHash, !canCount || counted >= data.totalYes || hasFullRangeCounting || challengeEnd === null || tip >= challengeEnd)}
+          {actionButton("challenge", `${key}-challenge`, (s) => challengeProposal(s, config, { proposalOutPoint: cell.outPoint, countingOutPoints: matching.map((entry) => entry.cell.outPoint) }), !matching.length || counted < data.totalYes || challengeEnd === null || tip >= challengeEnd, "button-danger")}
         </>}
       </div>
+      {mode === "initiator" && data.status === 0 && checkedProposal === proposal.id && <div className="check-result" role="status">{checkResult}</div>}
     </article>;
   }
 
@@ -186,9 +222,9 @@ function App() {
 
   async function submitProposal(event: React.FormEvent) {
     event.preventDefault();
-    await execute("create", "创建提案", async (active) => {
+    await execute("create", "createProposal", async (active) => {
       const recipientAddress = await ccc.Address.fromString(recipient, client);
-      const result = await createProposal(active, config, { description: description.trim(), requestedAmount: amountFromInput(amount), recipient: recipientAddress.script });
+      const result = await createProposal(active, config, { description: description.trim(), requestedAmount: amountFromInput(amount, language), recipient: recipientAddress.script });
       setDescription(""); setAmount(""); setRecipient("");
       return result.txHash;
     });
@@ -196,34 +232,34 @@ function App() {
 
   return <div className="app">
     <aside className="sidebar">
-      <button className="brand" onClick={() => navigate("overview")}><span className="brand-mark">✳</span><span>CKB <b>Treasury</b><small>社区治理平台</small></span></button>
-      <div className="sidebar-label">工作台</div>
-      <nav aria-label="主导航">
-        <button className={page === "overview" ? "active" : ""} onClick={() => navigate("overview")}><LayoutDashboard size={18}/> 概览</button>
-        <button className={page === "voter" ? "active" : ""} onClick={() => navigate("voter")}><Vote size={18}/> 参与投票</button>
-        <button className={page === "initiator" ? "active" : ""} onClick={() => navigate("initiator")}><Plus size={18}/> 发起提案</button>
-        <button className={page === "challenger" ? "active" : ""} onClick={() => navigate("challenger")}><ShieldCheck size={18}/> 发起挑战</button>
+      <button className="brand" onClick={() => navigate("overview")}><span className="brand-mark">✳</span><span>CKB <b>Treasury</b><small>{t("brandSubtitle")}</small></span></button>
+      <div className="sidebar-label">{t("workspace")}</div>
+      <nav aria-label={t("primaryNavigation")}>
+        <button className={page === "overview" ? "active" : ""} onClick={() => navigate("overview")}><LayoutDashboard size={18}/> {t("overview")}</button>
+        <button className={page === "voter" ? "active" : ""} onClick={() => navigate("voter")}><Vote size={18}/> {t("voter")}</button>
+        <button className={page === "initiator" ? "active" : ""} onClick={() => navigate("initiator")}><Plus size={18}/> {t("initiator")}</button>
+        <button className={page === "challenger" ? "active" : ""} onClick={() => navigate("challenger")}><ShieldCheck size={18}/> {t("challenger")}</button>
       </nav>
-      <div className="sidebar-bottom"><span className="network-dot"/> DEVELOP NET <span className="mono">:8114</span><p>仅连接本地开发网络</p></div>
+      <div className="sidebar-bottom"><span className="network-dot"/> {t("developNet")} <span className="mono">:8114</span><p>{t("localNetwork")}</p></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumb">CKB Treasury <ChevronRight size={14}/> {({ overview: "概览", voter: "参与投票", initiator: "发起提案", challenger: "发起挑战" })[page]}</div><div className="top-actions"><span className="top-network"><span className="network-dot"/> Develop</span><button className="icon-button" title="刷新链上数据" aria-label="刷新链上数据" onClick={() => void refresh()}><RefreshCw size={17} className={loading ? "spin" : ""}/></button><button className="wallet-button" title={address || "连接 ckb-tw 钱包"} onClick={() => void connect()}><Wallet size={16}/>{address ? short(address, 9, 5) : "连接钱包"}</button></div></header>
+      <header className="topbar"><div className="breadcrumb">CKB Treasury <ChevronRight size={14}/> {t(page)}</div><div className="top-actions"><span className="top-network"><span className="network-dot"/> Develop</span><label className="language-control"><span>{t("languageLabel")}</span><select aria-label={t("languageLabel")} value={language} onChange={(event) => { setLanguage(event.target.value as Language); setNotice(null); }}><option value="en-US">{t("english")}</option><option value="zh-CN">{t("chinese")}</option></select></label><button className="icon-button" title={t("refresh")} aria-label={t("refresh")} onClick={() => void refresh()}><RefreshCw size={17} className={loading ? "spin" : ""}/></button><button className="wallet-button" title={address || t("connectWallet")} onClick={() => void connect()}><Wallet size={16}/>{address ? short(address, 9, 5) : t("connectWallet")}</button></div></header>
       <main>
-        {notice && <div className={`notice ${notice.error ? "error" : ""}`} role="status"><span>{notice.text}</span><button title="关闭提示" aria-label="关闭提示" onClick={() => setNotice(null)}><X size={16}/></button></div>}
+        {notice && <div className={`notice ${notice.error ? "error" : ""}`} role="status"><span>{notice.text}</span><button title={t("closeNotice")} aria-label={t("closeNotice")} onClick={() => setNotice(null)}><X size={16}/></button></div>}
         {page === "overview" && <>
-          <div className="page-heading"><div><div className="eyebrow">GOVERNANCE / DEVELOP NETWORK</div><h1>让每一票，都有去处<span className="accent">.</span></h1><p>从提案到执行，一起决定社区资金的流向。</p></div><div className="block-indicator"><span className="network-dot"/> 链上高度 <strong>#{tip.toString()}</strong></div></div>
-          <section className="stats" aria-label="治理概况"><div><span>进行中的提案</span><strong>{active.length.toString().padStart(2, "0")}</strong><small>等待社区表态</small></div><div><span>挑战期提案</span><strong>{finalized.length.toString().padStart(2, "0")}</strong><small>可复核计票结果</small></div><div><span>已通过提案</span><strong>{proposals.filter((p) => p.data.status === 2).length.toString().padStart(2, "0")}</strong><small>已完成治理决议</small></div></section>
-          <div className="section-heading"><div><span className="eyebrow">GET STARTED</span><h2>你想从哪里开始？</h2></div></div>
-          <div className="entry-grid"><button onClick={() => navigate("initiator")} className="entry entry-dark"><span className="entry-icon"><ArrowUpRight size={23}/></span><span className="entry-title">发起提案</span><span className="entry-copy">提交资金申请，统计赞成票并推动提案通过。</span><span className="entry-link">进入发起人工作台 <ArrowRight size={17}/></span></button><button onClick={() => navigate("voter")} className="entry entry-light"><span className="entry-icon"><Vote size={23}/></span><span className="entry-title">参与投票</span><span className="entry-copy">使用 DAO 存款为开放中的提案投票。</span><span className="entry-link">浏览可投提案 <ArrowRight size={17}/></span></button></div>
-          <div className="section-heading config-head"><div><span className="eyebrow">ON-CHAIN PARAMETERS</span><h2>当前治理规则</h2></div><span className="muted">读取自 Config Cell</span></div>
-          <section className="config-grid">{settings ? <><div><span>赞成票门槛</span><strong>{ckb(settings.yesThreshold)} CKB</strong></div><div><span>最小提案抵押</span><strong>{ckb(settings.minimalProposalCapacity)} CKB</strong></div><div><span>最小投票额</span><strong>{ckb(settings.minimalVoteAmount)} CKB</strong></div><div><span>投票持续时间</span><strong>{settings.voteDuration.toString()} 区块</strong></div><div><span>投票窗口</span><strong>{settings.voteWindow.toString()} 区块</strong></div><div><span>挑战期</span><strong>{settings.challengeTime.toString()} 区块</strong></div><div><span>紧急暂停</span><strong>{settings.emergentHalt ? "已启用" : "未启用"}</strong></div><div><span>否决锁哈希</span><code>{settings.vetoLockScriptHash}</code></div></> : <p className="muted">{loading ? "正在读取链上配置…" : "无法读取配置，请检查本地节点与索引器。"}</p>}</section>
-          {settings && <div className="config-technical"><div><span>投票脚本 · hash type {settings.voteHashType}</span><code>{settings.voteCodeHash}</code></div><div><span>计票脚本 · hash type {settings.countingHashType}</span><code>{settings.countingCodeHash}</code></div><div><span>无条件解锁脚本 · hash type {settings.alwaysSuccessHashType}</span><code>{settings.alwaysSuccessCodeHash}</code></div></div>}
-          <button className="challenge-link" onClick={() => navigate("challenger")}><ShieldCheck size={19}/> 查看可挑战的提案 <ArrowRight size={17}/></button>
+          <div className="page-heading"><div><div className="eyebrow">{t("governanceEyebrow")}</div><h1>{t("welcomeTitle")}<span className="accent">.</span></h1><p>{t("welcomeSubtitle")}</p></div><div className="block-indicator"><span className="network-dot"/> {t("chainHeight")} <strong>#{tip.toString()}</strong></div></div>
+          <section className="stats" aria-label={t("governanceRules")}><div><span>{t("activeProposals")}</span><strong>{active.length.toString().padStart(2, "0")}</strong><small>{t("activeHint")}</small></div><div><span>{t("challengingProposals")}</span><strong>{finalized.length.toString().padStart(2, "0")}</strong><small>{t("challengingHint")}</small></div><div><span>{t("passedProposals")}</span><strong>{proposals.filter((p) => p.data.status === 2).length.toString().padStart(2, "0")}</strong><small>{t("passedHint")}</small></div></section>
+          <div className="section-heading"><div><span className="eyebrow">{t("getStartedEyebrow")}</span><h2>{t("getStarted")}</h2></div></div>
+          <div className="entry-grid"><button onClick={() => navigate("initiator")} className="entry entry-dark"><span className="entry-icon"><ArrowUpRight size={23}/></span><span className="entry-title">{t("initiator")}</span><span className="entry-copy">{t("entryInitiator")}</span><span className="entry-link">{t("entryInitiatorLink")} <ArrowRight size={17}/></span></button><button onClick={() => navigate("voter")} className="entry entry-light"><span className="entry-icon"><Vote size={23}/></span><span className="entry-title">{t("voter")}</span><span className="entry-copy">{t("entryVoter")}</span><span className="entry-link">{t("entryVoterLink")} <ArrowRight size={17}/></span></button></div>
+          <div className="section-heading config-head"><div><span className="eyebrow">{t("parametersEyebrow")}</span><h2>{t("governanceRules")}</h2></div><span className="muted">{t("fromConfig")}</span></div>
+          <section className="config-grid">{settings ? <><div><span>{t("yesThreshold")}</span><strong>{ckb(settings.yesThreshold)} CKB</strong></div><div><span>{t("proposalBond")}</span><strong>{ckb(settings.minimalProposalCapacity)} CKB</strong></div><div><span>{t("minVoteAmount")}</span><strong>{ckb(settings.minimalVoteAmount)} CKB</strong></div><div><span>{t("voteDuration")}</span><strong>{t("blocks", { count: String(settings.voteDuration) })}</strong></div><div><span>{t("voteWindow")}</span><strong>{t("blocks", { count: String(settings.voteWindow) })}</strong></div><div><span>{t("challengeTime")}</span><strong>{t("blocks", { count: String(settings.challengeTime) })}</strong></div><div><span>{t("emergencyHalt")}</span><strong>{t(settings.emergentHalt ? "enabled" : "disabled")}</strong></div><div><span>{t("vetoHash")}</span><code>{settings.vetoLockScriptHash}</code></div></> : <p className="muted">{loading ? t("loadingConfig") : t("configUnavailable")}</p>}</section>
+          {settings && <div className="config-technical"><div><span>{t("voteScript", { type: settings.voteHashType })}</span><code>{settings.voteCodeHash}</code></div><div><span>{t("countingScript", { type: settings.countingHashType })}</span><code>{settings.countingCodeHash}</code></div><div><span>{t("alwaysSuccessScript", { type: settings.alwaysSuccessHashType })}</span><code>{settings.alwaysSuccessCodeHash}</code></div></div>}
+          <button className="challenge-link" onClick={() => navigate("challenger")}><ShieldCheck size={19}/> {t("viewChallenges")} <ArrowRight size={17}/></button>
         </>}
-        {page === "voter" && <><div className="page-heading inner"><div><div className="eyebrow">YOUR VOICE MATTERS</div><h1>参与投票<span className="accent">.</span></h1><p>选择立场，以该地址在提案前存入的全部 DAO 资产为票数。</p></div><div className="block-indicator">{active.length} 个开放提案</div></div><div className="section-heading"><h2>投票窗口内</h2><span className="muted">每区块约 8 秒</span></div><div className="list">{active.length ? active.map((p) => proposalCard(p, "voter")) : <div className="empty">当前没有可投票的提案。</div>}</div></>}
-        {page === "initiator" && <><div className="page-heading inner"><div><div className="eyebrow">PROPOSAL WORKSPACE</div><h1>发起提案<span className="accent">.</span></h1><p>提出资金申请，统计选票，推进决议。</p></div><div className="block-indicator">{mine.length} 个我的提案</div></div><section className="create-panel"><div><span className="eyebrow">NEW PROPOSAL</span><h2>创建新提案</h2><p>提案将由当前钱包地址持有；接收地址用于确定链上的接收方锁哈希。</p></div><form onSubmit={(event) => void submitProposal(event)}><label>提案描述<textarea required maxLength={500} placeholder="简要说明资金用途" value={description} onChange={(event) => setDescription(event.target.value)} /></label><div className="form-row"><label>申请金额 <span>CKB</span><input required inputMode="decimal" placeholder="例如 150" value={amount} onChange={(event) => setAmount(event.target.value)}/></label><label>接收方 CKB 地址 <span title="将计算为 recipient_lock_hash"><CircleHelp size={14}/></span><input required placeholder="ckt1..." value={recipient} onChange={(event) => setRecipient(event.target.value)}/></label></div><button className="button-primary" disabled={!!busy || !signer}>{busy === "create" ? <LoaderCircle className="spin" size={16}/> : <Plus size={17}/>} 创建提案</button></form></section><div className="section-heading"><h2>我的提案</h2><span className="muted">{mine.length} 个链上单元</span></div><div className="list">{mine.length ? mine.map((p) => proposalCard(p, "initiator")) : <div className="empty">这个地址还没有发起提案。</div>}</div></>}
-        {page === "challenger" && <><div className="page-heading inner"><div><div className="eyebrow">KEEP GOVERNANCE HONEST</div><h1>发起挑战<span className="accent">.</span></h1><p>查看最终确认的提案，以反对票计票单元发起复核。</p></div><div className="block-indicator">{finalized.length} 个待复核提案</div></div><div className="section-heading"><h2>挑战期提案</h2><span className="muted">奖励发送至计票者的钱包地址</span></div><div className="list">{finalized.length ? finalized.map((p) => proposalCard(p, "challenger")) : <div className="empty">当前没有处于挑战期的提案。</div>}</div></>}
-        <footer><span>CKB Treasury · Local develop</span><span>由链上数据驱动 <ExternalLink size={13}/></span></footer>
+        {page === "voter" && <><div className="page-heading inner"><div><div className="eyebrow">{t("voterEyebrow")}</div><h1>{t("voter")}<span className="accent">.</span></h1><p>{t("voterSubtitle")}</p></div><div className="block-indicator">{t("openProposalCount", { count: active.length })}</div></div><div className="section-heading"><h2>{t("withinWindow")}</h2><span className="muted">{t("blockEstimate")}</span></div><div className="list">{active.length ? active.map((p) => proposalCard(p, "voter")) : <div className="empty">{t("noOpenProposals")}</div>}</div></>}
+        {page === "initiator" && <><div className="page-heading inner"><div><div className="eyebrow">{t("proposalEyebrow")}</div><h1>{t("initiator")}<span className="accent">.</span></h1><p>{t("initiatorSubtitle")}</p></div><div className="block-indicator">{t("myProposalCount", { count: mine.length })}</div></div><section className="create-panel"><div><span className="eyebrow">{t("newProposalEyebrow")}</span><h2>{t("newProposal")}</h2><p>{t("createHint")}</p></div><form onSubmit={(event) => void submitProposal(event)}><label>{t("descriptionLabel")}<textarea required maxLength={500} placeholder={t("descriptionPlaceholder")} value={description} onChange={(event) => setDescription(event.target.value)} /></label><div className="form-row"><label>{t("requestedAmount")} <span>CKB</span><input required inputMode="decimal" placeholder={t("amountPlaceholder")} value={amount} onChange={(event) => setAmount(event.target.value)}/></label><label>{t("recipientAddress")} <span title={t("recipientHelp")}><CircleHelp size={14}/></span><input required placeholder="ckt1..." value={recipient} onChange={(event) => setRecipient(event.target.value)}/></label></div><button className="button-primary" disabled={!!busy || !signer}>{busy === "create" ? <LoaderCircle className="spin" size={16}/> : <Plus size={17}/>} {t("createProposal")}</button></form></section><div className="section-heading"><h2>{t("myProposals")}</h2><span className="muted">{t("cellCount", { count: mine.length })}</span></div><div className="list">{mine.length ? mine.map((p) => proposalCard(p, "initiator")) : <div className="empty">{t("noMyProposals")}</div>}</div></>}
+        {page === "challenger" && <><div className="page-heading inner"><div><div className="eyebrow">{t("challengerEyebrow")}</div><h1>{t("challenger")}<span className="accent">.</span></h1><p>{t("challengerSubtitle")}</p></div><div className="block-indicator">{t("pendingCount", { count: finalized.length })}</div></div><div className="section-heading"><h2>{t("challengeProposals")}</h2><span className="muted">{t("rewardHint")}</span></div><div className="list">{finalized.length ? finalized.map((p) => proposalCard(p, "challenger")) : <div className="empty">{t("noChallenges")}</div>}</div></>}
+        <footer><span>CKB Treasury · Local develop</span><span>{t("liveData")} <ExternalLink size={13}/></span></footer>
       </main>
     </div>
   </div>;

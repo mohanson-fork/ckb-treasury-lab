@@ -5,6 +5,7 @@ import { findCountingCells, findProposalCells, findVoteCells, loadConfigCell } f
 import { requireCellHeader, scriptId } from "../../sdk/src/utils";
 import type { ConfigCellInfo, CountingCellInfo, ProposalCellInfo, VoteCellInfo } from "../../sdk/src/query";
 import deployment from "../../deployment/devnet.json";
+import { currentLanguage, translate } from "./i18n";
 
 export const config = { ...deployment, rpcUrl: `${location.origin}/rpc` } as DeploymentConfig;
 export const client = buildClient(config);
@@ -25,12 +26,12 @@ async function originalOwner(proposal: ProposalCellInfo): Promise<ccc.Script> {
   for (let step = 0; step < proposal.data.status; step++) {
     const created = await client.getTransaction(current);
     const previous = created?.transaction.inputs[0]?.previousOutput;
-    if (!previous) throw new Error("找不到提案的上一笔交易");
+    if (!previous) throw new Error(translate(currentLanguage(), "previousTransactionMissing"));
     current = previous.txHash;
   }
   const original = await client.getTransaction(current);
   const lock = original?.transaction.outputs[0]?.lock;
-  if (!lock) throw new Error("找不到原始提案锁");
+  if (!lock) throw new Error(translate(currentLanguage(), "proposalOwnerMissing"));
   return lock;
 }
 

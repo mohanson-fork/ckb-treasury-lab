@@ -28,7 +28,7 @@ def cd(dst: str) -> typing.Generator[None, typing.Any, None]:
     os.chdir(cwd)
 
 
-def init():
+def develop():
     subprocess.run('pm k ckbm ckbr', shell=True)
     with cd('/home/ubuntu/src/ckb-treasury-lab/solution1/devnet'):
         bash('rm -rf data ckb ckb-cli pk1 pk2')
@@ -43,9 +43,7 @@ def init():
         bash('./ckb-cli account import --privkey-path pk2')
         bash('PMNAME=ckbm pm c ./ckb run --indexer')
         bash('PMNAME=ckbr pm c ./ckb miner')
-
-
-def main():
+    time.sleep(15)
     pyckb.config.upgrade(pyckb.config.develop.rpc.url)
     pyckb.config.current = pyckb.config.develop
     user = [
