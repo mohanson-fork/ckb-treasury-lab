@@ -1,4 +1,5 @@
 /build
 /devnet/ckb
 /devnet/ckb-cli
-
+/devnet/data
+/target
