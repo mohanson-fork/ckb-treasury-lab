@@ -1,4 +1,5 @@
 /build
+/deployment/devnet.json
 /devnet/ckb
 /devnet/ckb-cli
 /devnet/data

@@ -4,10 +4,14 @@ import type { DeploymentConfig } from "../../sdk/src/config";
 import { findCountingCells, findProposalCells, findVoteCells, loadConfigCell } from "../../sdk/src/query";
 import { requireCellHeader, scriptId } from "../../sdk/src/utils";
 import type { ConfigCellInfo, CountingCellInfo, ProposalCellInfo, VoteCellInfo } from "../../sdk/src/query";
-import deployment from "../../deployment/devnet.json";
 import { currentLanguage, translate } from "./i18n";
 
-export const config = { ...deployment, rpcUrl: `${location.origin}/rpc` } as DeploymentConfig;
+declare const __CKB_VOTE_DEPLOYMENT__: DeploymentConfig;
+declare const __CKB_VOTE_NETWORK__: "devnet" | "testnet";
+
+export const network = __CKB_VOTE_NETWORK__;
+export const rpcPort = new URL(__CKB_VOTE_DEPLOYMENT__.rpcUrl).port;
+export const config = { ...__CKB_VOTE_DEPLOYMENT__, rpcUrl: `${location.origin}/rpc` };
 export const client = buildClient(config);
 
 export type ProposalView = ProposalCellInfo & {
