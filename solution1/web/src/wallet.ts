@@ -32,6 +32,12 @@ export class WalletSigner extends ccc.SignerCkbScriptReadonly {
     super(client, lock);
   }
 
+  async assertAccount(): Promise<void> {
+    if (await connectWallet() !== this.address) {
+      throw new Error(translate(currentLanguage(), "walletAccountChanged"));
+    }
+  }
+
   async prepareTransaction(txLike: ccc.TransactionLike): Promise<ccc.Transaction> {
     const tx = ccc.Transaction.from(txLike);
     const lock = this.scripts[0];
@@ -41,6 +47,7 @@ export class WalletSigner extends ccc.SignerCkbScriptReadonly {
   }
 
   async signOnlyTransaction(txLike: ccc.TransactionLike): Promise<ccc.Transaction> {
+    await this.assertAccount();
     const tx = ccc.Transaction.from(txLike);
     const signed = await walletProvider().request({
       method: "ckb_signTransaction",

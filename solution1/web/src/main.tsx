@@ -1,18 +1,21 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowRight, ArrowUpRight, Check, ChevronRight, CircleHelp, Clock3, ExternalLink, LayoutDashboard, LoaderCircle, Plus, RefreshCw, ShieldCheck, ThumbsDown, ThumbsUp, Vote, Wallet, X } from "lucide-react";
+import { ArrowRight, ArrowUpRight, Check, ChevronRight, CircleHelp, Clock3, ExternalLink, LayoutDashboard, LoaderCircle, LogOut, Plus, QrCode, RefreshCw, ShieldCheck, ThumbsDown, ThumbsUp, Vote, Wallet, X } from "lucide-react";
 import { ccc } from "@ckb-ccc/shell";
+import { ccc as connector } from "@ckb-ccc/connector-react";
 import { castVote, withdrawVote } from "../../sdk/src/vote";
 import { createProposal, finalizeProposal, passProposal, challengeProposal, recycleProposal } from "../../sdk/src/proposal";
 import { createCountingCell } from "../../sdk/src/counting";
 import { blake160, requireCellHeader, waitForTransaction } from "../../sdk/src/utils";
-import { client, config, fetchSnapshot, type ProposalView } from "./chain";
+import { client, config, fetchSnapshot, network, rpcPort, type ProposalView } from "./chain";
 import { connectWallet, WalletSigner } from "./wallet";
 import { currentLanguage, translate, type Language, type TranslationKey } from "./i18n";
 import "./style.css";
 
 type Page = "overview" | "voter" | "initiator" | "challenger";
 type Snapshot = Awaited<ReturnType<typeof fetchSnapshot>>;
+type WalletAccount = { signer: ccc.Signer; address: string; lock: ccc.Script };
+const walletNetworks = [{ name: network === "testnet" ? "Testnet" : "Develop", client }];
 const SHANNONS = 100_000_000n;
 
 function ckb(amount: bigint): string {
@@ -35,7 +38,11 @@ function short(value: string, start = 12, end = 8) {
 
 function remaining(target: bigint, tip: bigint, language: Language) {
   const blocks = target > tip ? target - tip : 0n;
-  return blocks ? translate(language, "blocksAndSeconds", { blocks: String(blocks), seconds: String(blocks * 8n) }) : translate(language, "expired");
+  return blocks ? translate(language, "blocksAndSeconds", { blocks: String(blocks), seconds: String(blocks * 10n) }) : translate(language, "expired");
+}
+
+function estimatedDate(target: bigint, tip: bigint, language: Language) {
+  return new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(Date.now() + Number(target - tip) * 10_000));
 }
 
 function nonOverlappingCounting(entries: ProposalView["counting"]): ProposalView["counting"] {
@@ -55,8 +62,18 @@ function App() {
   const [language, setLanguage] = useState<Language>(currentLanguage);
   const t = (key: Parameters<typeof translate>[1], variables?: Record<string, string | number>) => translate(language, key, variables);
   const [page, setPage] = useState<Page>("overview");
-  const [address, setAddress] = useState("");
-  const [signer, setSigner] = useState<WalletSigner | null>(null);
+  const { open, disconnect: disconnectConnector, signerInfo } = connector.useCcc();
+  const [walletSource, setWalletSource] = useState<"ckb-tw" | "ccc">("ccc");
+  const [account, setAccount] = useState<WalletAccount | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const walletDialog = useRef<HTMLDialogElement>(null);
+  const connectionAttempt = useRef(0);
+  const destinationAfterConnect = useRef<Page | undefined>(undefined);
+  const connectorSigner = signerInfo?.signer;
+  const activeAccount = walletSource === "ccc" && account?.signer !== connectorSigner ? null : account;
+  const signer = activeAccount?.signer;
+  const lock = activeAccount?.lock;
+  const address = activeAccount?.address ?? "";
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
@@ -91,20 +108,87 @@ function App() {
     return () => clearInterval(timer);
   }, []);
 
-  async function connect(destination?: Page) {
+  function connect(destination?: Page) {
+    destinationAfterConnect.current = destination;
+    walletDialog.current?.showModal();
+  }
+
+  function acceptAccount(next: WalletAccount) {
+    setAccount(next);
+    setNotice(null);
+    if (destinationAfterConnect.current) setPage(destinationAfterConnect.current);
+    destinationAfterConnect.current = undefined;
+    walletDialog.current?.close();
+  }
+
+  useEffect(() => {
+    if (walletSource !== "ccc") return;
+    const attempt = ++connectionAttempt.current;
+    setAccount(null);
+    if (!connectorSigner) return;
+    void connectorSigner.getRecommendedAddress().then(async (address) => {
+      if (connectorSigner.client.url !== client.url) throw new Error(translate(currentLanguage(), "wrongNetwork", { network: translate(currentLanguage(), network === "testnet" ? "testnet" : "developNet") }));
+      const parsed = await ccc.Address.fromString(address, client);
+      if (attempt === connectionAttempt.current) acceptAccount({ signer: connectorSigner, address, lock: parsed.script });
+    }).catch((error) => {
+      if (attempt === connectionAttempt.current) setNotice({ text: String(error), error: true });
+    });
+    return () => { connectionAttempt.current++; };
+  }, [connectorSigner, walletSource]);
+
+  async function connectCkbTw() {
+    const attempt = ++connectionAttempt.current;
+    setConnecting(true);
     try {
       const account = await connectWallet();
-      if (!account.startsWith("ckt")) throw new Error(t("wrongNetwork"));
+      if (!account.startsWith("ckt")) throw new Error(t("wrongNetwork", { network: t(network === "testnet" ? "testnet" : "developNet") }));
       const { script } = await ccc.Address.fromString(account, client);
       const secp = await ccc.Script.fromKnownScript(client, ccc.KnownScript.Secp256k1Blake160, script.args);
       if (!script.eq(secp)) throw new Error(t("unsupportedAccount"));
-      setAddress(account);
-      setSigner(new WalletSigner(client, account, script));
-      setNotice(null);
-      if (destination) setPage(destination);
+      if (attempt !== connectionAttempt.current) return;
+      disconnectConnector();
+      setWalletSource("ckb-tw");
+      acceptAccount({ signer: new WalletSigner(client, account, script), address: account, lock: script });
     } catch (error) {
-      setNotice({ text: String(error), error: true });
+      if (attempt === connectionAttempt.current) setNotice({ text: String(error), error: true });
+    } finally {
+      if (attempt === connectionAttempt.current) setConnecting(false);
     }
+  }
+
+  function connectCcc() {
+    connectionAttempt.current++;
+    disconnectConnector();
+    setAccount(null);
+    setWalletSource("ccc");
+    walletDialog.current?.close();
+    open();
+  }
+
+  useEffect(() => {
+    if (walletSource !== "ckb-tw" || !(account?.signer instanceof WalletSigner)) return;
+    const directSigner = account.signer;
+    let cancelled = false;
+    const checkAccount = async () => {
+      try {
+        await directSigner.assertAccount();
+      } catch (error) {
+        if (!cancelled) {
+          setAccount(null);
+          setNotice({ text: String(error), error: true });
+        }
+      }
+    };
+    window.addEventListener("focus", checkAccount);
+    return () => { cancelled = true; window.removeEventListener("focus", checkAccount); };
+  }, [account, walletSource]);
+
+  function disconnect() {
+    connectionAttempt.current++;
+    disconnectConnector();
+    setAccount(null);
+    destinationAfterConnect.current = undefined;
+    walletDialog.current?.close();
   }
 
   function navigate(destination: Page) {
@@ -117,13 +201,21 @@ function App() {
     setNotice(null);
   }
 
-  async function execute(key: string, label: TranslationKey, action: (active: WalletSigner) => Promise<string>) {
+  async function execute(key: string, label: TranslationKey, action: (active: ccc.Signer) => Promise<string>) {
     if (!signer) return void connect();
     setBusy(key);
     setNotice({ text: t("signing", { action: t(label) }), error: false });
     try {
+      if (signer instanceof WalletSigner) {
+        try {
+          await signer.assertAccount();
+        } catch (error) {
+          disconnect();
+          throw error;
+        }
+      }
       const result = await action(signer);
-      setNotice({ text: t("actionSuccess", { action: t(label), hash: short(result, 16, 10) }), error: false });
+      setNotice({ text: t("actionSuccess", { action: t(label), hash: result }), error: false });
       await waitForTransaction(client, result);
       await refresh(false);
     } catch (error) {
@@ -134,36 +226,41 @@ function App() {
   }
 
   function owned(proposal: ProposalView) {
-    return signer?.scripts[0].eq(proposal.owner) ?? false;
+    return lock?.eq(proposal.owner) ?? false;
   }
 
   const settings = snapshot?.settings.data;
   const tip = snapshot?.tip ?? 0n;
   const proposals = snapshot?.proposals ?? [];
-  const recipientHash = signer ? blake160(signer.scripts[0].toBytes()) : null;
+  const recipientHash = lock ? blake160(lock.toBytes()) : null;
   const active = proposals.filter((p) => p.data.status === 0 && settings && tip < p.origin + settings.voteWindow);
   const mine = proposals.filter((p) => owned(p) || (p.data.status === 1 && p.data.recipientLockHash === recipientHash));
   const finalized = proposals.filter((p) => p.data.status === 1);
 
-  function actionButton(label: TranslationKey, key: string, action: (active: WalletSigner) => Promise<string>, disabled = false, className = "button-secondary") {
+  function actionButton(label: TranslationKey, key: string, action: (active: ccc.Signer) => Promise<string>, disabled = false, className = "button-secondary") {
     return <button className={className} disabled={!!busy || disabled} onClick={() => void execute(key, label, action)}>{busy === key ? <LoaderCircle className="spin" size={16} /> : null}{t(label)}</button>;
   }
 
   function proposalCard(proposal: ProposalView, mode: Page) {
     const { cell, data, origin, votes, counting } = proposal;
     const key = cell.outPoint.txHash;
-    const myVote = votes.find((vote) => signer?.scripts[0].eq(vote.cell.cellOutput.lock));
+    const myVote = votes.find((vote) => lock?.eq(vote.cell.cellOutput.lock));
     const direction = mode === "challenger" ? 0 : 1;
-    const matching = nonOverlappingCounting(counting.filter((entry) => entry.data.direction === direction && signer?.scripts[0].eq(entry.cell.cellOutput.lock)));
+    const matching = nonOverlappingCounting(counting.filter((entry) => entry.data.direction === direction && lock?.eq(entry.cell.cellOutput.lock)));
     const counted = matching.reduce((sum, entry) => sum + entry.data.voteAmount, 0n);
     const end = origin + (settings?.voteDuration ?? 0n) + 1n;
     const windowEnd = origin + (settings?.voteWindow ?? 0n);
     const challengeEnd = challengeBlocks[key] === undefined ? null : challengeBlocks[key] + (settings?.challengeTime ?? 0n) + 1n;
+    const countdown: { target: bigint | null; label: TranslationKey; estimate: TranslationKey } = data.status === 0
+      ? mode === "voter"
+        ? { target: windowEnd, label: "votingWindow", estimate: "estimatedExpiry" }
+        : { target: end, label: "countingAvailable", estimate: "estimatedCounting" }
+      : { target: challengeEnd, label: "challengeDeadline", estimate: "estimatedExpiry" };
     const canCount = mode === "challenger" ? tip > origin + (settings?.voteDuration ?? 0n) : tip >= end;
     const voteOpen = data.status === 0 && tip < windowEnd;
     const hasYesVotes = votes.some((entry) => entry.data.direction === 1);
     const hasYesCounting = counting.some((entry) => entry.data.direction === 1);
-    const hasFullRangeCounting = counting.some((entry) => entry.data.direction === direction && signer?.scripts[0].eq(entry.cell.cellOutput.lock) && entry.data.startHash === 0 && entry.data.endHash === 65535);
+    const hasFullRangeCounting = counting.some((entry) => entry.data.direction === direction && lock?.eq(entry.cell.cellOutput.lock) && entry.data.startHash === 0 && entry.data.endHash === 65535);
     const noYesVotes = !hasYesVotes && !hasYesCounting;
     const recycleAt = end + (settings?.challengeTime ?? 0n);
     const threshold = settings?.yesThreshold ?? 0n;
@@ -173,15 +270,15 @@ function App() {
         ? t("noYesVotesMessage", { next: tip >= recycleAt ? t(voteOpen ? "recycleOrWait" : "recycleReady") : t("recycleLater", { time: remaining(recycleAt, tip, language) }) })
         : t(proposal.yes >= threshold ? "votesMeetThreshold" : "votesBelowThreshold", { amount: ckb(proposal.yes), threshold: ckb(threshold) });
     return <article className="proposal" key={`${key}:${cell.outPoint.index}`}>
-      <div className="proposal-top"><span className={`tag tag-${data.status}`}>{t((["openStatus", "finalizedStatus", "passedStatus"] as const)[data.status] ?? "unknownStatus")}</span><span className="mono muted" title={proposal.id}>{short(proposal.id)}</span></div>
+      <div className="proposal-top"><span className={`tag tag-${data.status}`}>{t((["openStatus", "finalizedStatus", "passedStatus"] as const)[data.status] ?? "unknownStatus")}</span><span className="mono muted">{proposal.id}</span></div>
       <h3>{data.description || t("unnamedProposal")}</h3>
       <div className="proposal-details">
         <div><span>{t("requestedAmount")}</span><strong>{ckb(data.requestedAmount)} <small>CKB</small></strong></div>
-        <div><span>{t("recipientHash")}</span><code title={data.recipientLockHash}>{short(data.recipientLockHash, 14, 8)}</code></div>
+        <div><span>{t("recipientHash")}</span><code>{data.recipientLockHash}</code></div>
         <div><span>{t("yesVotes")}</span><strong className="yes">{ckb(proposal.yes)} <small>CKB</small></strong></div>
         <div><span>{t("noVotes")}</span><strong className="no">{ckb(proposal.no)} <small>CKB</small></strong></div>
       </div>
-      {data.status !== 2 && <div className="countdown"><Clock3 size={16}/><span>{t(data.status === 0 ? mode === "voter" ? "votingWindow" : "countingAvailable" : "challengeDeadline")}</span><strong>{data.status === 1 && challengeEnd === null ? t("loadingHeader") : remaining(data.status === 0 ? mode === "voter" ? windowEnd : end : challengeEnd!, tip, language)}</strong></div>}
+      {data.status !== 2 && <div className="countdown"><Clock3 size={16}/><span>{t(countdown.label)}</span><strong>{countdown.target === null ? t("loadingHeader") : remaining(countdown.target, tip, language)}{countdown.target !== null && tip < countdown.target && <><br/><small>{t(countdown.estimate, { date: estimatedDate(countdown.target, tip, language) })}</small></>}</strong></div>}
       {mode === "voter" && myVote && <div className="vote-record"><Check size={16}/><span>{t("voted", { direction: t(myVote.data.direction === 1 ? "yes" : "no"), amount: ckb(myVote.data.voteAmount) })}</span><span className="muted">{t("blockNumber", { number: voteBlocks[`${myVote.cell.outPoint.txHash}:${myVote.cell.outPoint.index}`] ?? t("loading") })}</span></div>}
       {(mode === "initiator" || mode === "challenger") && matching.length > 0 && <div className="vote-record"><Check size={16}/><span>{t("countingSummary", { count: matching.length, amount: ckb(counted) })}</span></div>}
       <div className="proposal-actions">
@@ -231,6 +328,13 @@ function App() {
   }
 
   return <div className="app">
+    <dialog ref={walletDialog} className="wallet-dialog" aria-labelledby="wallet-dialog-title" onClose={() => { connectionAttempt.current++; setConnecting(false); }}>
+      <div className="wallet-dialog-heading"><h2 id="wallet-dialog-title">{t("connectWallet")}</h2><button className="icon-button" title={t("closeNotice")} aria-label={t("closeNotice")} onClick={() => walletDialog.current?.close()}><X size={17}/></button></div>
+      {notice?.error && <p className="wallet-error" role="alert">{notice.text}</p>}
+      <button className="wallet-option" disabled={!!busy || connecting} onClick={() => void connectCkbTw()}><Wallet size={20}/>ckb-tw{connecting && <LoaderCircle className="spin" size={16}/>}</button>
+      <button className="wallet-option" disabled={!!busy || connecting} onClick={connectCcc}><QrCode size={20}/>CCC / Khie<ChevronRight size={17}/></button>
+      {signer && <button className="wallet-option" disabled={!!busy} onClick={disconnect}><LogOut size={20}/>{t("disconnectWallet")}</button>}
+    </dialog>
     <aside className="sidebar">
       <button className="brand" onClick={() => navigate("overview")}><span className="brand-mark">✳</span><span>CKB <b>Treasury</b><small>{t("brandSubtitle")}</small></span></button>
       <div className="sidebar-label">{t("workspace")}</div>
@@ -240,14 +344,14 @@ function App() {
         <button className={page === "initiator" ? "active" : ""} onClick={() => navigate("initiator")}><Plus size={18}/> {t("initiator")}</button>
         <button className={page === "challenger" ? "active" : ""} onClick={() => navigate("challenger")}><ShieldCheck size={18}/> {t("challenger")}</button>
       </nav>
-      <div className="sidebar-bottom"><span className="network-dot"/> {t("developNet")} <span className="mono">:8114</span><p>{t("localNetwork")}</p></div>
+      <div className="sidebar-bottom"><span className="network-dot"/> {t(network === "testnet" ? "testnet" : "developNet")} {rpcPort && <span className="mono">:{rpcPort}</span>}<p>{t(network === "testnet" ? "testNetwork" : "localNetwork")}</p></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumb">CKB Treasury <ChevronRight size={14}/> {t(page)}</div><div className="top-actions"><span className="top-network"><span className="network-dot"/> Develop</span><label className="language-control"><span>{t("languageLabel")}</span><select aria-label={t("languageLabel")} value={language} onChange={(event) => { setLanguage(event.target.value as Language); setNotice(null); }}><option value="en-US">{t("english")}</option><option value="zh-CN">{t("chinese")}</option></select></label><button className="icon-button" title={t("refresh")} aria-label={t("refresh")} onClick={() => void refresh()}><RefreshCw size={17} className={loading ? "spin" : ""}/></button><button className="wallet-button" title={address || t("connectWallet")} onClick={() => void connect()}><Wallet size={16}/>{address ? short(address, 9, 5) : t("connectWallet")}</button></div></header>
+      <header className="topbar"><div className="breadcrumb">CKB Treasury <ChevronRight size={14}/> {t(page)}</div><div className="top-actions"><span className="top-network"><span className="network-dot"/> {t(network === "testnet" ? "testnet" : "developNet")}</span><label className="language-control"><span>{t("languageLabel")}</span><select aria-label={t("languageLabel")} value={language} onChange={(event) => { setLanguage(event.target.value as Language); setNotice(null); }}><option value="en-US">{t("english")}</option><option value="zh-CN">{t("chinese")}</option></select></label><button className="icon-button" title={t("refresh")} aria-label={t("refresh")} onClick={() => void refresh()}><RefreshCw size={17} className={loading ? "spin" : ""}/></button><button className="wallet-button" title={address || t("connectWallet")} onClick={() => void connect()}><Wallet size={16}/>{address ? short(address, 9, 5) : t("connectWallet")}</button></div></header>
       <main>
         {notice && <div className={`notice ${notice.error ? "error" : ""}`} role="status"><span>{notice.text}</span><button title={t("closeNotice")} aria-label={t("closeNotice")} onClick={() => setNotice(null)}><X size={16}/></button></div>}
         {page === "overview" && <>
-          <div className="page-heading"><div><div className="eyebrow">{t("governanceEyebrow")}</div><h1>{t("welcomeTitle")}<span className="accent">.</span></h1><p>{t("welcomeSubtitle")}</p></div><div className="block-indicator"><span className="network-dot"/> {t("chainHeight")} <strong>#{tip.toString()}</strong></div></div>
+          <div className="page-heading"><div><div className="eyebrow">{t("governanceEyebrow", { network: t(network === "testnet" ? "testnet" : "developNet") })}</div><h1>{t("welcomeTitle")}<span className="accent">.</span></h1><p>{t("welcomeSubtitle")}</p></div><div className="block-indicator"><span className="network-dot"/> {t("chainHeight")} <strong>#{tip.toString()}</strong></div></div>
           <section className="stats" aria-label={t("governanceRules")}><div><span>{t("activeProposals")}</span><strong>{active.length.toString().padStart(2, "0")}</strong><small>{t("activeHint")}</small></div><div><span>{t("challengingProposals")}</span><strong>{finalized.length.toString().padStart(2, "0")}</strong><small>{t("challengingHint")}</small></div><div><span>{t("passedProposals")}</span><strong>{proposals.filter((p) => p.data.status === 2).length.toString().padStart(2, "0")}</strong><small>{t("passedHint")}</small></div></section>
           <div className="section-heading"><div><span className="eyebrow">{t("getStartedEyebrow")}</span><h2>{t("getStarted")}</h2></div></div>
           <div className="entry-grid"><button onClick={() => navigate("initiator")} className="entry entry-dark"><span className="entry-icon"><ArrowUpRight size={23}/></span><span className="entry-title">{t("initiator")}</span><span className="entry-copy">{t("entryInitiator")}</span><span className="entry-link">{t("entryInitiatorLink")} <ArrowRight size={17}/></span></button><button onClick={() => navigate("voter")} className="entry entry-light"><span className="entry-icon"><Vote size={23}/></span><span className="entry-title">{t("voter")}</span><span className="entry-copy">{t("entryVoter")}</span><span className="entry-link">{t("entryVoterLink")} <ArrowRight size={17}/></span></button></div>
@@ -257,12 +361,12 @@ function App() {
           <button className="challenge-link" onClick={() => navigate("challenger")}><ShieldCheck size={19}/> {t("viewChallenges")} <ArrowRight size={17}/></button>
         </>}
         {page === "voter" && <><div className="page-heading inner"><div><div className="eyebrow">{t("voterEyebrow")}</div><h1>{t("voter")}<span className="accent">.</span></h1><p>{t("voterSubtitle")}</p></div><div className="block-indicator">{t("openProposalCount", { count: active.length })}</div></div><div className="section-heading"><h2>{t("withinWindow")}</h2><span className="muted">{t("blockEstimate")}</span></div><div className="list">{active.length ? active.map((p) => proposalCard(p, "voter")) : <div className="empty">{t("noOpenProposals")}</div>}</div></>}
-        {page === "initiator" && <><div className="page-heading inner"><div><div className="eyebrow">{t("proposalEyebrow")}</div><h1>{t("initiator")}<span className="accent">.</span></h1><p>{t("initiatorSubtitle")}</p></div><div className="block-indicator">{t("myProposalCount", { count: mine.length })}</div></div><section className="create-panel"><div><span className="eyebrow">{t("newProposalEyebrow")}</span><h2>{t("newProposal")}</h2><p>{t("createHint")}</p></div><form onSubmit={(event) => void submitProposal(event)}><label>{t("descriptionLabel")}<textarea required maxLength={500} placeholder={t("descriptionPlaceholder")} value={description} onChange={(event) => setDescription(event.target.value)} /></label><div className="form-row"><label>{t("requestedAmount")} <span>CKB</span><input required inputMode="decimal" placeholder={t("amountPlaceholder")} value={amount} onChange={(event) => setAmount(event.target.value)}/></label><label>{t("recipientAddress")} <span title={t("recipientHelp")}><CircleHelp size={14}/></span><input required placeholder="ckt1..." value={recipient} onChange={(event) => setRecipient(event.target.value)}/></label></div><button className="button-primary" disabled={!!busy || !signer}>{busy === "create" ? <LoaderCircle className="spin" size={16}/> : <Plus size={17}/>} {t("createProposal")}</button></form></section><div className="section-heading"><h2>{t("myProposals")}</h2><span className="muted">{t("cellCount", { count: mine.length })}</span></div><div className="list">{mine.length ? mine.map((p) => proposalCard(p, "initiator")) : <div className="empty">{t("noMyProposals")}</div>}</div></>}
+        {page === "initiator" && <><div className="page-heading inner"><div><div className="eyebrow">{t("proposalEyebrow")}</div><h1>{t("initiator")}<span className="accent">.</span></h1><p>{t("initiatorSubtitle")}</p></div><div className="block-indicator">{t("myProposalCount", { count: mine.length })}</div></div><section className="create-panel"><div><span className="eyebrow">{t("newProposalEyebrow")}</span><h2>{t("newProposal")}</h2><p>{t("createHint")}</p></div><form onSubmit={(event) => void submitProposal(event)}><label>{t("descriptionLabel")}<textarea required maxLength={500} placeholder={t("descriptionPlaceholder")} value={description} onChange={(event) => setDescription(event.target.value)} /></label><div className="form-row"><label>{t("requestedAmount")} <span>CKB</span><input required inputMode="decimal" placeholder={t("amountPlaceholder")} value={amount} onChange={(event) => setAmount(event.target.value)}/></label><label>{t("recipientAddress")} <span title={t("recipientHelp")}><CircleHelp size={14}/></span><input required value={recipient} onChange={(event) => setRecipient(event.target.value)}/></label></div><button className="button-primary" disabled={!!busy || !signer}>{busy === "create" ? <LoaderCircle className="spin" size={16}/> : <Plus size={17}/>} {t("createProposal")}</button></form></section><div className="section-heading"><h2>{t("myProposals")}</h2><span className="muted">{t("cellCount", { count: mine.length })}</span></div><div className="list">{mine.length ? mine.map((p) => proposalCard(p, "initiator")) : <div className="empty">{t("noMyProposals")}</div>}</div></>}
         {page === "challenger" && <><div className="page-heading inner"><div><div className="eyebrow">{t("challengerEyebrow")}</div><h1>{t("challenger")}<span className="accent">.</span></h1><p>{t("challengerSubtitle")}</p></div><div className="block-indicator">{t("pendingCount", { count: finalized.length })}</div></div><div className="section-heading"><h2>{t("challengeProposals")}</h2><span className="muted">{t("rewardHint")}</span></div><div className="list">{finalized.length ? finalized.map((p) => proposalCard(p, "challenger")) : <div className="empty">{t("noChallenges")}</div>}</div></>}
-        <footer><span>CKB Treasury · Local develop</span><span>{t("liveData")} <ExternalLink size={13}/></span></footer>
+        <footer><span>CKB Treasury · {t(network === "testnet" ? "testNetwork" : "localNetwork")}</span><span>{t("liveData")} <ExternalLink size={13}/></span></footer>
       </main>
     </div>
   </div>;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(<connector.Provider name="CKB Treasury" defaultClient={client} clientOptions={walletNetworks}><App /></connector.Provider>);
