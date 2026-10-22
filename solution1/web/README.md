@@ -31,3 +31,16 @@ $ CKB_VOTE_NETWORK=devnet  bun run dev
 ```
 
 To run the application on devnet, follow `../docs/knowledge/devnet.md` to set up your local environment.
+
+## Docker
+
+Build and run the development server from the `solution1` directory:
+
+```sh
+$ docker build -f web/Dockerfile -t ckb-treasury-lab-web .
+$ docker run --rm -p 5173:5173 ckb-treasury-lab-web
+```
+
+The image uses Ubuntu 24.04, installs Bun, and runs `bun run dev` from
+`web`. It defaults to testnet; set `CKB_VOTE_NETWORK=devnet` when running the
+container if `deployment/devnet.json` is available.
