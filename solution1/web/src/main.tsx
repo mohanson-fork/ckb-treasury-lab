@@ -250,7 +250,7 @@ function App() {
 
   const settings = snapshot?.settings.data;
   const tip = snapshot?.tip ?? 0n;
-  const proposals = snapshot?.proposals ?? [];
+  const proposals = [...(snapshot?.proposals ?? [])].sort((a, b) => a.origin > b.origin ? -1 : a.origin < b.origin ? 1 : 0);
   const recipientHash = lock ? blake160(lock.toBytes()) : null;
   const active = proposals.filter((p) => p.data.status === 0 && settings && tip < p.origin + settings.voteWindow);
   const mine = proposals.filter((p) => owned(p) || (p.data.status === 1 && p.data.recipientLockHash === recipientHash));
