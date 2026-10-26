@@ -338,9 +338,9 @@ def testnet():
             '--minimal-proposal-capacity 200',
             '--yes-threshold 1000',
             '--minimal-vote-amount 100',
-            '--vote-duration 1000',
-            '--vote-window 1000',
-            '--challenge-time 1000',
+            '--vote-duration 180',
+            '--vote-window 180',
+            '--challenge-time 180',
         ]))
 
 
