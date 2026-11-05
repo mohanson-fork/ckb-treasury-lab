@@ -6,11 +6,15 @@ A React application built with Bun and Vite on top of the voting SDK in `../sdk`
 
 Choose **Connect wallet**, then **ckb-tw** for the browser extension or **CCC / Khie** for the CCC wallet selector. Choose **Khie** there to pair by QR code or pairing link. Reopen the wallet menu to disconnect or switch wallets.
 
+Once connected, use the copy icon beside the shortened address in the top-right corner to copy the full CKB address. A message confirms success or reports a clipboard error. Clipboard access requires HTTPS or localhost and browser permission.
+
 The selected wallet connection is restored after a page refresh when the wallet remains available and authorized. Disconnecting clears the saved selection.
 
 The connector uses the selected deployment's network and RPC. Khie wallets must support CKB transaction signing and the account's lock on that network. Voting requires eligible DAO deposits under the same account lock and funds for transaction fees. Devnet wallets must also support that devnet's deployed lock scripts.
 
-`@ckb-ccc/connector-react` is pinned to `2.1.3` (Connector `2.2.1`) to share CCC core `1.21.0` with the SDK's shell `1.3.12`. Update these packages together to avoid incompatible signer/client classes.
+Vote and withdrawal submissions show a spinning pending indicator and disable repeat submission, including after a page reload. Withdrawal stays pending until the transaction is confirmed and the spent vote disappears from the chain snapshot, or the transaction is rejected.
+
+`@ckb-ccc/connector-react` is pinned to `2.2.2` (Connector `2.3.2`), and the web application and SDK use shell `1.3.15`. Update these packages together to avoid incompatible signer/client classes.
 
 ## Network Selection
 
